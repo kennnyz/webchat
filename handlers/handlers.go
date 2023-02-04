@@ -6,6 +6,7 @@ import (
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
+	"sort"
 )
 
 var wsChan = make(chan WsPayload)
@@ -17,9 +18,10 @@ var views = jet.NewSet(
 )
 
 type wsJsonResponse struct {
-	Action      string `json:"action"`
-	Message     string `json:"message"`
-	MessageType string `json:"message_type"`
+	Action         string   `json:"action"`
+	Message        string   `json:"message"`
+	MessageType    string   `json:"message_type"`
+	ConnectedUsers []string `json:"connected_users"`
 }
 
 // UpgradeConnection is used to upgrade the connection to a websocket connection
@@ -108,10 +110,38 @@ func ListenToWsChannel() {
 	for {
 		e := <-wsChan
 
-		response.Action = "Got here"
-		response.Message = "Some message and action was " + e.Action
-		broadCastToAll(response)
+		switch e.Action {
+		case "username":
+			// get list of all users and send it back via broadcast
+			clients[e.Conn] = e.Username
+			users := getUserList()
+			response.Action = "list_users"
+			response.ConnectedUsers = users
+			broadCastToAll(response)
+
+		case "left":
+			response.Action = "list_users"
+			delete(clients, e.Conn)
+			users := getUserList()
+			response.ConnectedUsers = users
+			broadCastToAll(response)
+		case "broadcast":
+			response.Action = "broadcast"
+			response.Message = fmt.Sprintf("<strong>%s</strong>: %s", e.Username, e.Message)
+			broadCastToAll(response)
+		}
 	}
+}
+
+func getUserList() []string {
+	var users []string
+	for _, v := range clients {
+		if v != "" {
+			users = append(users, v)
+		}
+	}
+	sort.Strings(users)
+	return users
 }
 
 // renderPage is used to render a page using the jet templating engine
