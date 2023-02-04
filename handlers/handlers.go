@@ -1,11 +1,15 @@
 package handlers
 
 import (
+	"fmt"
 	"github.com/CloudyKit/jet/v6"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 )
+
+var wsChan = make(chan WsPayload)
+var clients = make(map[WebSocketConnection]string)
 
 var views = jet.NewSet(
 	jet.NewOSFileSystemLoader("./html"),
@@ -56,12 +60,61 @@ func WsEndpoint(w http.ResponseWriter, r *http.Request) {
 	var response wsJsonResponse
 	response.Message = `<em><small>Connected to server <small></em>`
 
+	// When a client connects to the websocket endpoint, we create a new WebSocketConnection
+	conn := WebSocketConnection{Conn: ws}
+	clients[conn] = ""
+
 	err = ws.WriteJSON(response)
 	if err != nil {
 		log.Println(err)
 	}
+
+	// Start listening for messages from the client
+	go ListenForWs(&conn)
 }
 
+func broadCastToAll(response wsJsonResponse) {
+	for client := range clients {
+		err := client.WriteJSON(response)
+		if err != nil {
+			log.Println(err)
+			_ = client.Close()
+			delete(clients, client)
+		}
+	}
+}
+
+func ListenForWs(conn *WebSocketConnection) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println("Error: ", fmt.Sprintf("%s", r))
+		}
+	}()
+	var payload WsPayload
+	for {
+		err := conn.ReadJSON(&payload)
+		if err != nil {
+		} else {
+			payload.Conn = *conn
+			wsChan <- payload
+		}
+	}
+}
+
+// Show the message to all clients
+
+func ListenToWsChannel() {
+	var response wsJsonResponse
+	for {
+		e := <-wsChan
+
+		response.Action = "Got here"
+		response.Message = "Some message and action was " + e.Action
+		broadCastToAll(response)
+	}
+}
+
+// renderPage is used to render a page using the jet templating engine
 func renderPage(w http.ResponseWriter, tmpl string, data jet.VarMap) error {
 	view, err := views.GetTemplate(tmpl)
 	if err != nil {
