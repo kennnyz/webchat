@@ -1,28 +1,23 @@
 package handlers
 
 import (
+	"database/sql"
 	"fmt"
 	"github.com/CloudyKit/jet/v6"
 	"github.com/gorilla/websocket"
+	"github.com/kennnyz/webchat/models"
 	"log"
 	"net/http"
 	"sort"
 )
 
-var wsChan = make(chan WsPayload)
-var clients = make(map[WebSocketConnection]string)
+var wsChan = make(chan models.ClientNotifier)
+var clients = make(map[models.WebSocketConnection]string)
 
 var views = jet.NewSet(
 	jet.NewOSFileSystemLoader("./html"),
 	jet.InDevelopmentMode(),
 )
-
-type wsJsonResponse struct {
-	Action         string   `json:"action"`
-	Message        string   `json:"message"`
-	MessageType    string   `json:"message_type"`
-	ConnectedUsers []string `json:"connected_users"`
-}
 
 // UpgradeConnection is used to upgrade the connection to a websocket connection
 var upgradeConnection = websocket.Upgrader{
@@ -33,24 +28,7 @@ var upgradeConnection = websocket.Upgrader{
 	},
 }
 
-type WebSocketConnection struct {
-	*websocket.Conn
-}
-
-type WsPayload struct {
-	Action   string              `json:"action"`
-	Username string              `json:"username"`
-	Message  string              `json:"message"`
-	Conn     WebSocketConnection `json:"-"`
-}
-
-func Home(w http.ResponseWriter, r *http.Request) {
-	err := renderPage(w, "home.html", nil)
-	if err != nil {
-		log.Println(err)
-	}
-}
-
+// Мы подключились к веб сокету и теперь слушаем его в горутине ListenForWs()
 func WsEndpoint(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgradeConnection.Upgrade(w, r, nil)
 	if err != nil {
@@ -59,11 +37,11 @@ func WsEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Client connected to endpoint ")
 
-	var response wsJsonResponse
+	var response models.WsJsonResponse
 	response.Message = `<em><small>Connected to server <small></em>`
 
 	// When a client connects to the websocket endpoint, we create a new WebSocketConnection
-	conn := WebSocketConnection{Conn: ws}
+	conn := models.WebSocketConnection{Conn: ws}
 	clients[conn] = ""
 
 	err = ws.WriteJSON(response)
@@ -75,7 +53,7 @@ func WsEndpoint(w http.ResponseWriter, r *http.Request) {
 	go ListenForWs(&conn)
 }
 
-func broadCastToAll(response wsJsonResponse) {
+func broadCastToAll(response models.WsJsonResponse) {
 	for client := range clients {
 		err := client.WriteJSON(response)
 		if err != nil {
@@ -86,27 +64,31 @@ func broadCastToAll(response wsJsonResponse) {
 	}
 }
 
-func ListenForWs(conn *WebSocketConnection) {
+func ListenForWs(conn *models.WebSocketConnection) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Println("Error: ", fmt.Sprintf("%s", r))
 		}
 	}()
-	var payload WsPayload
+	var notifier models.ClientNotifier
 	for {
-		err := conn.ReadJSON(&payload)
+		err := conn.ReadJSON(&notifier)
 		if err != nil {
+			// ничего не делаем
 		} else {
-			payload.Conn = *conn
-			wsChan <- payload
+			notifier.Conn = *conn
+			wsChan <- notifier
 		}
 	}
 }
 
 // Show the message to all clients
+// should listen
 
-func ListenToWsChannel() {
-	var response wsJsonResponse
+// Слушаем события от пользователей и транслируем его другим
+
+func ListenToWsChannel(db *sql.DB) {
+	var response models.WsJsonResponse
 	for {
 		e := <-wsChan
 
@@ -118,7 +100,6 @@ func ListenToWsChannel() {
 			response.Action = "list_users"
 			response.ConnectedUsers = users
 			broadCastToAll(response)
-
 		case "left":
 			response.Action = "list_users"
 			delete(clients, e.Conn)
@@ -126,6 +107,10 @@ func ListenToWsChannel() {
 			response.ConnectedUsers = users
 			broadCastToAll(response)
 		case "broadcast":
+			err := e.WriteActionToDB(db)
+			if err != nil {
+				log.Fatal(err)
+			}
 			response.Action = "broadcast"
 			response.Message = fmt.Sprintf("<strong>%s</strong>: %s", e.Username, e.Message)
 			broadCastToAll(response)
@@ -142,21 +127,4 @@ func getUserList() []string {
 	}
 	sort.Strings(users)
 	return users
-}
-
-// renderPage is used to render a page using the jet templating engine
-func renderPage(w http.ResponseWriter, tmpl string, data jet.VarMap) error {
-	view, err := views.GetTemplate(tmpl)
-	if err != nil {
-		log.Println(err)
-		return err
-	}
-
-	err = view.Execute(w, data, nil)
-	if err != nil {
-		log.Println(err)
-		return err
-	}
-
-	return nil
 }
